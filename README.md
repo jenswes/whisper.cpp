@@ -5,8 +5,7 @@ You speak → **Whisper** transcribes → a model loaded in **LM Studio** genera
 
 Sorry for not being a coder, i did this with the help of ChatGPT 5, while having a nice Sunday afternoon :-)
 
-Jump to **“LM Studio backend & new options”** below for setup, CLI flags, build notes, and troubleshooting you can append to your README.
-
+Jump to **“LM Studio backend & new options”** below for setup, CLI flags, build notes, and troubleshooting.
 
 # whisper.cpp
 
