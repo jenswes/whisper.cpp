@@ -30,6 +30,20 @@ if (WHISPER_SDL2)
         llama-vocab.cpp
         unicode.cpp
         unicode-data.cpp)
+
+	# LM Studio backend (HTTP, OpenAI-kompatibel)
+	find_package(CURL REQUIRED)
+	find_package(nlohmann_json CONFIG REQUIRED)
+
+	target_sources(whisper-talk-llama PRIVATE
+	  ${CMAKE_CURRENT_LIST_DIR}/llm_backend.h
+	  ${CMAKE_CURRENT_LIST_DIR}/backend_lmstudio.h
+	  ${CMAKE_CURRENT_LIST_DIR}/backend_lmstudio.cpp
+	)
+
+	target_link_libraries(whisper-talk-llama PRIVATE CURL::libcurl nlohmann_json::nlohmann_json)
+
+
     target_include_directories(${TARGET} PRIVATE ${SDL2_INCLUDE_DIRS})
 
     target_link_libraries(${TARGET} PRIVATE common common-sdl whisper ${SDL2_LIBRARIES} ${CMAKE_THREAD_LIBS_INIT})
