@@ -17,6 +17,8 @@ struct LLMGenerateParams {
     int   seed         = -1;
     bool  stream       = true;
     std::string system_prompt;
+    // OpenAI-kompatible Stop-Sequenzen
+    std::vector<std::string> stop;
 };
 
 class LLMBackend {

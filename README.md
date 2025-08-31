@@ -1,3 +1,13 @@
+# Intro, Changes here: LM Studio + Whisper (speech-to-LLM)
+
+This project extends the original `talk-llama` demo to **seamlessly combine Whisper speech recognition with local LLMs served by LM Studio**.  
+You speak → **Whisper** transcribes → a model loaded in **LM Studio** generates the reply → optional **TTS** speaks it.
+
+Sorry for not being a coder, i did this with the help of ChatGPT 5, while having a nice Sunday afternoon :-)
+
+Jump to **“LM Studio backend & new options”** below for setup, CLI flags, build notes, and troubleshooting you can append to your README.
+
+
 # whisper.cpp
 
 ![whisper.cpp](https://user-images.githubusercontent.com/1991296/235238348-05d0f6a4-da44-4900-a1de-d0707e75b763.jpeg)
@@ -846,3 +856,271 @@ If you have any kind of feedback about this project feel free to use the Discuss
 You can use the [Show and tell](https://github.com/ggml-org/whisper.cpp/discussions/categories/show-and-tell) category
 to share your own projects that use `whisper.cpp`. If you have a question, make sure to check the
 [Frequently asked questions (#126)](https://github.com/ggml-org/whisper.cpp/discussions/126) discussion.
+
+# 📚 LM Studio backend & new options
+
+## What’s new (high level)
+
+- **Pluggable LLM backend**
+  - A tiny interface (`llm_backend.h`) decouples dialogue logic from the actual LLM.
+  - **`backend_lmstudio.{h,cpp}`** implements this interface for **LM Studio** (OpenAI-compatible HTTP API).
+
+- **Talk to any local model via LM Studio**
+  - Instead of running a local `llama.cpp` model, responses can be produced by any model you’ve loaded in LM Studio (e.g. *openai/gpt-oss-20b*, Llama 3.x, Mistral, Qwen, …).
+
+- **New CLI flags** for language, streaming, token limits (ASR vs LLM), sanitizing (umlauts), voice id, and sampling.
+
+- **DE/EN prompting & language control**
+  - Whisper ASR language via `-l`, LLM reply language via `--llm-lang` (e.g. `de`).
+
+- **Robust output cleaning**
+  - Removes stray `Assistant:` / `LLaMA:` / `User:` labels to avoid double speaker tags.
+
+- **Separate token limits**
+  - `--max-tokens` (ASR chunk size, Whisper) vs **`--llm-max-tokens`** (LLM reply length).
+
+- **Optional streaming**
+  - With `--llm-stream`, LLM tokens stream into the console; TTS still plays the final full answer (no half sentences).
+
+---
+
+## Files & architecture
+
+    examples/talk-llama/
+     ├─ talk-llama.cpp          # Main app (audio/VAD, ASR, LLM call, TTS, dialogue loop)
+     ├─ llm_backend.h           # Tiny interface for pluggable LLM backends
+     ├─ backend_lmstudio.h/.cpp # LM Studio implementation (OpenAI /v1/chat/completions)
+     └─ (optionally other backends in the future)
+
+### `llm_backend.h` (interface)
+
+    struct LLMToken {
+        std::string text;
+        bool is_final = false;
+    };
+
+    struct LLMGenerateParams {
+        int   max_tokens   = 256;
+        float temperature  = 0.7f;
+        int   top_k        = 40;
+        float top_p        = 0.95f;
+        float min_p        = 0.05f;
+        int   seed         = -1;
+        bool  stream       = true;
+        std::string system_prompt;
+    };
+
+    class LLMBackend {
+    public:
+        virtual ~LLMBackend() = default;
+        virtual bool init() = 0;
+        virtual void shutdown() = 0;
+        virtual bool generate(const std::string& prompt,
+                              const LLMGenerateParams& params,
+                              const std::function<void(const LLMToken&)>& on_token) = 0;
+    };
+
+### `backend_lmstudio.h/.cpp` (LM Studio backend)
+
+- Talks to **`/v1/chat/completions`** (OpenAI-compatible).
+- Supports **non-stream** (single JSON) and **SSE streaming** (incremental tokens).
+- Passes sampling params (`temperature`, `top_k`, `top_p`, `min_p`, `seed`), `system_prompt`, and optional **stop sequences**.
+- Designed to be robust to early/empty stops and to strip accidental speaker labels in the reply.
+
+---
+
+## New CLI flags (summary)
+
+**LM Studio (LLM)**  
+- `--llm-backend lmstudio` – enable LM Studio backend.  
+- `--lmstudio-url URL` – e.g. `http://localhost:1234/v1`.  
+- `--lmstudio-model ID` – **exact model id** as reported by LM Studio (`/v1/models`).  
+- `--lmstudio-api-key KEY` – default `lm-studio`.  
+- `--lmstudio-test "PROMPT"` – single chat call to LM Studio, then exit (smoke test).  
+- `--llm-lang CODE` – reply language (`de`, `en`); controls the system instruction.  
+- `--llm-max-tokens N` – **LLM** reply token limit (separate from ASR).  
+- `--llm-stream` – stream LLM tokens to console (TTS still uses the final text).
+
+**ASR / general**  
+- `-l LANG, --language LANG` – Whisper language (`de`, `en`, `auto`, …).  
+- `-mw FILE` – Whisper model file (e.g. `models/ggml-large-v3-turbo.bin`).  
+- `--allow-umlauts` – relaxed sanitizing that keeps `äöüÄÖÜß`.  
+- `--voice-id N` – forwarded to your `speak` (TTS) script/engine.
+
+**Sampling (also applied to LM Studio)**  
+- `--temp <f>`  
+- `--top-k <n>`  
+- `--top-p <f>`  
+- `--min-p <f>`  
+- `--seed <n>`
+
+> **Important:**  
+> `--max-tokens` = Whisper ASR chunk length (input side)  
+> `--llm-max-tokens` = **LLM** answer length (output side)
+
+You can still set persona and bot labels:  
+- `-p, --person NAME` (e.g. `-p Jens`)  
+- `-bn, --bot-name NAME` (display only; LM Studio replies are label-free by design)
+
+---
+
+## Prompting & language behavior
+
+- Two starter dialogue prompts (EN/DE) shape style and brevity.  
+- For LM Studio we also push a **system instruction**:
+  - If `--llm-lang de`: *“Always reply in German. Do **not** include speaker prefixes (like ‘User:’ or ‘Assistant:’). Answer with plain content.”*
+  - If `--llm-lang en`: equivalent instruction in English.
+- LM Studio dialogue context is intentionally minimal (user text + answer) to reduce label hallucinations and keep the model focused.
+
+---
+
+## Output cleaning (to avoid doubled labels)
+
+- Strips leading `Assistant:` / `<BotName>:` / `<Person>:` if the model prepends them anyway.  
+- Removes **in-line** occurrences like `\nAssistant:` / `\nLLaMA:` / `\n<name>:` that occasionally appear in longer replies.  
+- Removes bracketed meta (`[...]`, `(...)`) from the ASR input before sending to the LLM.  
+- `--allow-umlauts` keeps `äöüÄÖÜß` in ASR text; without it, sanitizing is stricter.
+
+---
+
+## Streaming (console)
+
+- With `--llm-stream`, tokens are printed as they arrive for a snappier feel.  
+- **TTS still plays the completed answer** (no mid-sentence playback), to keep audio natural.
+
+---
+
+## Keeping the original llama.cpp path
+
+- If you do **not** enable LM Studio, the classic `llama.cpp` path runs:
+  - Prompt eval, sampler chain (top-k/top-p/temp/min-p/seed), session caching, anti-prompts, etc.
+
+---
+
+## Build notes
+
+**Extra deps** for LM Studio backend:  
+- **libcurl** (HTTP + SSE)  
+- **nlohmann/json** (header-only)
+
+macOS (Homebrew):
+
+    brew install curl nlohmann-json
+
+### CMake snippet (`examples/talk-llama/CMakeLists.txt`)
+
+    find_package(CURL REQUIRED)
+    # nlohmann/json is header-only
+
+    target_sources(whisper-talk-llama PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/backend_lmstudio.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/llm_backend.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/backend_lmstudio.h
+    )
+
+    target_link_libraries(whisper-talk-llama PRIVATE CURL::libcurl)
+
+Build:
+
+    cmake -S . -B build -DWHISPER_ALL_WARNINGS=OFF
+    cmake --build build -j
+
+---
+
+## LM Studio: server & model list
+
+Start server:
+
+    lms server start
+    # => "Server is now running on port 1234"
+
+List models:
+
+    curl -s http://localhost:1234/v1/models | jq -r '.data[].id'
+
+---
+
+## Example run
+
+    ./build/bin/whisper-talk-llama \
+      --llm-backend lmstudio \
+      --lmstudio-url http://localhost:1234/v1 \
+      --lmstudio-model "openai/gpt-oss-20b" \
+      -mw models/ggml-large-v3-turbo.bin \
+      -l de \
+      --llm-lang de \
+      --allow-umlauts \
+      --voice-id 2 \
+      --top-p 0.95 --temp 0.3 \
+      --max-tokens 128 \
+      --llm-max-tokens 256 \
+      --llm-stream
+
+**If answers cut off too early:**  
+- Increase `--llm-max-tokens` (e.g. 512–1024).  
+- Lower `--temp` (e.g. 0.2–0.3) for crisper, shorter text.
+
+To change the user name in transcripts:
+
+    -p Jens
+
+---
+
+## Troubleshooting
+
+- **Empty reply due to early stop**  
+  Some models may stop at position 0 when a stop sequence matches. The backend retries once without stop. If repeated, run without stop sequences.
+
+- **Doubled labels like `LLaMA:` / `Jens:`**  
+  The cleaner strips leading and inline labels; also ensure you set `--llm-lang` so the system instruction tells the model to omit prefixes.
+
+- **Weird characters / lost umlauts**  
+  Use `--allow-umlauts` to keep `äöüÄÖÜß` during sanitizing.
+
+- **Build errors (curl/json)**  
+  Ensure `libcurl` is installed and linked; ensure `nlohmann/json` headers are available.
+
+- **ASR vs LLM token limits confusion**  
+  `--max-tokens` is the **ASR** chunk size (input).  
+  `--llm-max-tokens` is the **LLM** output length (answer).
+
+---
+
+## Reference (important flags)
+
+**LM Studio**  
+- `--llm-backend lmstudio`  
+- `--lmstudio-url <URL>` (e.g. `http://localhost:1234/v1`)  
+- `--lmstudio-model <ID>` (from `/v1/models`)  
+- `--lmstudio-api-key <KEY>` (default `lm-studio`)  
+- `--lmstudio-test "<PROMPT>"`  
+- `--llm-lang {de|en}`  
+- `--llm-max-tokens N`  
+- `--llm-stream`
+
+**Sampling**  
+- `--temp <f>`  
+- `--top-k <n>`  
+- `--top-p <f>`  
+- `--min-p <f>`  
+- `--seed <n>`
+
+**ASR / general**  
+- `-mw <file>` (Whisper model)  
+- `-l <lang>` (Whisper: `de`, `en`, `auto`, …)  
+- `--max-tokens <n>` (ASR chunk)  
+- `-vms <ms>` (voice window)  
+- `-ac <n>` (audio ctx)  
+- `--allow-umlauts`  
+- `--voice-id <n>`  
+- `-p <name>` (person) / `-bn <name>` (bot name)  
+- `-t <n>` / `-ngl <n>` / `--flash-attn` / `-ng`
+
+---
+
+## Why these changes?
+
+- **Pluggable backend:** easy to swap LM Studio, ollama, or remote APIs.  
+- **Speech-first UX:** separate control of ASR input language and LLM reply language.  
+- **Stable prompting:** system instructions + cleaning reduce label echo.  
+- **More control:** distinct token limits, streaming, sanitizing, voice-id for TTS.
